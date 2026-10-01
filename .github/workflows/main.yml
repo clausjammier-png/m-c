@@ -1,0 +1,87 @@
+name: Max Compress PDF
+
+on:
+  push:
+    paths:
+      - 'input/*.pdf'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RASTER: "true"   # true = sabse chhota size (text select nahi hoga) | false = text safe rahega
+  GRAY: "false"    # true = black&white/grayscale, aur chhota
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript qpdf python3-pip
+          pip install img2pdf
+
+      - name: Compress
+        run: |
+          mkdir -p input compressed work
+          GSG=""; DEV=jpeg
+          if [ "$GRAY" = "true" ]; then
+            GSG="-sColorConversionStrategy=Gray -dProcessColorModel=/DeviceGray"; DEV=jpeggray
+          fi
+          for f in input/*.pdf; do
+            [ -e "$f" ] || continue
+            n=$(basename "$f" .pdf); w="work/$n"; mkdir -p "$w"
+
+            # 1) Ghostscript preset: screen
+            gs -sDEVICE=pdfwrite -dPDFSETTINGS=/screen $GSG -dNOPAUSE -dBATCH -dQUIET \
+               -sOutputFile="$w/a.pdf" "$f"
+
+            # 2) Ghostscript aggressive: 50 dpi + low JPEG quality
+            gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.5 $GSG \
+               -dDownsampleColorImages=true -dDownsampleGrayImages=true -dDownsampleMonoImages=true \
+               -dColorImageResolution=50 -dGrayImageResolution=50 -dMonoImageResolution=100 \
+               -dColorImageDownsampleType=/Bicubic -dGrayImageDownsampleType=/Bicubic \
+               -dAutoFilterColorImages=false -dAutoFilterGrayImages=false \
+               -dColorImageFilter=/DCTEncode -dGrayImageFilter=/DCTEncode \
+               -dDetectDuplicateImages=true -dCompressFonts=true -dSubsetFonts=true \
+               -dNOPAUSE -dBATCH -dQUIET -sOutputFile="$w/b.pdf" \
+               -c "<< /ColorImageDict << /QFactor 1.2 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> /GrayImageDict << /QFactor 1.2 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> >> setdistillerparams" \
+               -f "$f"
+
+            # 3) Raster: har page ko chhoti JPEG bana do (sabse chhota)
+            if [ "$RASTER" = "true" ]; then
+              gs -sDEVICE=$DEV -r60 -dJPEGQ=30 -dNOPAUSE -dBATCH -dQUIET \
+                 -o "$w/p-%04d.jpg" "$f"
+              img2pdf --imgsize 60dpix60dpi "$w"/p-*.jpg -o "$w/c.pdf"
+            fi
+
+            # Sabse chhota chuno
+            best="$f"
+            for c in "$w"/*.pdf; do
+              [ -e "$c" ] || continue
+              [ "$(stat -c%s "$c")" -lt "$(stat -c%s "$best")" ] && best="$c"
+            done
+
+            # Final squeeze
+            qpdf --object-streams=generate --recompress-flate --compression-level=9 \
+                 "$best" "compressed/$n.pdf" || cp "$best" "compressed/$n.pdf"
+            [ "$(stat -c%s "compressed/$n.pdf")" -gt "$(stat -c%s "$f")" ] && cp "$f" "compressed/$n.pdf"
+
+            echo "$n: $(du -h "$f" | cut -f1) -> $(du -h "compressed/$n.pdf" | cut -f1)"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compressed-pdfs
+          path: compressed/
+
+      - name: Save to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add compressed
+          git diff --cached --quiet || (git commit -m "Compressed PDFs" && git push)
